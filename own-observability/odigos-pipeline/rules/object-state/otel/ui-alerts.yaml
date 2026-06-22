@@ -1,0 +1,58 @@
+# Odigos UI Deployment object-state alerts — OpenTelemetry k8sclusterreceiver
+# (k8s_* metrics) source. Rendered from the odigos-prometheus-alerts chart
+# (components.ui.enabled=true, metricSource=otel); only the manifest is migrated.
+#
+# Object-state source: k8sclusterreceiver. Requires `clusterMetricsEnabled: true`
+# in the Odigos config (default false). Apply this OR the ksm/ set, not both.
+# See ./README.md for prerequisites and ../../../README.md for the capture method.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-ui-alerts-otel
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: ui
+    release: prometheus
+spec:
+  groups:
+    - name: ui.deployment.otel.rules
+      rules:
+        - alert: OdigosUiNotAvailable
+          expr: |
+            k8s_deployment_available{
+              k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-ui"
+            } < 1
+          for: 15m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "ui"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos UI has no available replicas"
+            description: |
+              Deployment {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_deployment_name }}
+              has no available replicas for more than 15m.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: OdigosUiDeploymentAbsent
+          expr: |
+            absent(
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-ui"
+              }
+            )
+          for: 30m
+          labels:
+            severity: warning
+            alert_type: absent
+            component: "ui"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos UI Deployment metrics absent (OTel)"
+            description: |
+              No `k8s_deployment_desired` series for namespace `odigos-system` /
+              deployment `odigos-ui` for more than 30m.
+            runbook_url: "https://docs.odigos.io/"

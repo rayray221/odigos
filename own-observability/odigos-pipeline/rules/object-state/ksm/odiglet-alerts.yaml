@@ -1,0 +1,171 @@
+# Odiglet DaemonSet object-state alerts — kube-state-metrics (kube_*) source.
+#
+# Object-state source: kube-state-metrics. Apply this OR the otel/ set, not both.
+# See ./README.md for prerequisites and ../../../README.md for the capture method.
+#
+# Tune the CrashLoopBackOff pod-count threshold by editing the `>= 1` at the
+# bottom of the OdigletPodsCrashLooping expression.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-odiglet-alerts-ksm
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: odiglet
+    # Prometheus Operator selects rules by this label (ruleSelector).
+    # See ../../../capture/README.md if your Prometheus expects a different value.
+    release: prometheus
+spec:
+  groups:
+    - name: odiglet.daemonset.ksm.rules
+      rules:
+
+        - alert: OdigletPodsCrashLooping
+          expr: |
+            count by (namespace, owner_name) (
+              max by (namespace, pod, owner_name) (
+                kube_pod_container_status_waiting_reason{
+                  reason="CrashLoopBackOff",
+                  namespace=~"odigos-system"
+                }
+                * on (namespace, pod) group_left(owner_name)
+                max by (namespace, pod, owner_name) (
+                  kube_pod_owner{
+                    owner_kind="DaemonSet",
+                    owner_name=~"odiglet"
+                  }
+                )
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            service: odigos
+            component: odiglet
+            alert_type: crashloop
+          annotations:
+            summary: "Odiglet pods are in CrashLoopBackOff (>= 1)"
+            description: |
+              {{ $value }} pod(s) of DaemonSet {{ $labels.namespace }}/{{ $labels.owner_name }}
+              have been in CrashLoopBackOff for more than 5m.
+              Affected nodes will have NO telemetry collection from odiglet.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odiglet
+              kubectl -n odigos-system describe ds odiglet
+              kubectl -n odigos-system logs ds/odiglet --previous --tail=200
+            runbook_url: https://docs.odigos.io/
+
+        - alert: OdigletDaemonSetNotScheduled
+          expr: |
+            kube_daemonset_status_desired_number_scheduled{namespace=~"odigos-system", daemonset=~"odiglet"}
+              -
+            kube_daemonset_status_current_number_scheduled{namespace=~"odigos-system", daemonset=~"odiglet"}
+              > 0
+          for: 10m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            alert_type: scheduling
+          annotations:
+            summary: "Odiglet DaemonSet has pods not scheduled"
+            description: |
+              {{ $value }} pod(s) of DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }}
+              are not scheduled for more than 10m.
+
+        - alert: OdigletDaemonSetMisScheduled
+          expr: |
+            kube_daemonset_status_number_misscheduled{namespace=~"odigos-system", daemonset=~"odiglet"} > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            alert_type: scheduling
+          annotations:
+            summary: "Odiglet DaemonSet has mis-scheduled pods"
+            description: |
+              {{ $value }} pod(s) of DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }}
+              are mis-scheduled.
+
+        - alert: OdigletDaemonSetRolloutStuck
+          expr: |
+            (
+              kube_daemonset_status_updated_number_scheduled{namespace=~"odigos-system", daemonset=~"odiglet"}
+                !=
+              kube_daemonset_status_desired_number_scheduled{namespace=~"odigos-system", daemonset=~"odiglet"}
+            ) or (
+              kube_daemonset_status_number_available{namespace=~"odigos-system", daemonset=~"odiglet"}
+                !=
+              kube_daemonset_status_desired_number_scheduled{namespace=~"odigos-system", daemonset=~"odiglet"}
+            )
+          for: 15m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            alert_type: rollout
+          annotations:
+            summary: "Odiglet DaemonSet rollout is stuck"
+            description: |
+              Rollout of DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }}
+              has been in progress for more than 15m.
+
+        - alert: OdigletDaemonSetNotReady
+          expr: |
+            kube_daemonset_status_number_ready{namespace=~"odigos-system", daemonset=~"odiglet"}
+              <
+            kube_daemonset_status_desired_number_scheduled{namespace=~"odigos-system", daemonset=~"odiglet"}
+          for: 10m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            alert_type: readiness
+          annotations:
+            summary: "Odiglet DaemonSet has unready pods"
+            description: |
+              DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} has fewer ready pods
+              ({{ $value }}) than desired for more than 10m.
+
+        - alert: OdigletContainerHighRestartRate
+          expr: |
+            rate(
+              kube_pod_container_status_restarts_total{
+                namespace=~"odigos-system",
+                container=~"odiglet"
+              }[15m]
+            ) > 0.0166
+          for: 10m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            alert_type: restarts
+          annotations:
+            summary: "Odiglet container restarting frequently"
+            description: |
+              Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }}
+              has restarted at {{ $value | humanize }} per second over the last 15m.
+
+        - alert: OdigletDaemonSetAbsent
+          expr: |
+            absent(
+              kube_daemonset_status_desired_number_scheduled{
+                namespace=~"odigos-system", daemonset=~"odiglet"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            service: odigos
+            component: odiglet
+            alert_type: absent
+          annotations:
+            summary: "Odiglet DaemonSet metrics absent"
+            description: |
+              No `kube_daemonset_status_desired_number_scheduled` series for
+              namespace `odigos-system` / daemonset `odiglet` for more than 15m.
+              Either the DaemonSet was deleted or kube-state-metrics is not
+              being scraped.

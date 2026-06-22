@@ -1,0 +1,185 @@
+# Odigos collector telemetry alerts (`otelcol_*` exporter/processor metrics
+# emitted by the Odigos gateway and node collectors) — Odigos pipeline method.
+#
+# Label scheme: k8s_namespace_name / k8s_pod_name (OTLP resource attributes
+# translated to Prometheus labels). This is the correct scheme when Odigos's
+# own metrics flow through the Odigos OTLP own-metrics pipeline.
+#
+# PREREQUISITE — Odigos own-metrics must be collected (set in Odigos config,
+# NOT in this manifest). Own-metrics are emitted when EITHER:
+#   * a metrics destination opts in with `odigosOwnMetricsEnabled: true`
+#     (Go field CollectOdigosOwnMetrics on the destination), OR
+#   * the bundled Odigos metrics store is enabled.
+# Gateway (cluster-collector) self-metrics specifically require the bundled
+# metrics store to be enabled; node-collector + agent metrics push via OTLP
+# independently. Only the scrape `Interval` is globally configurable
+# (`metricsSources.odigosOwnMetrics.interval`) — there is no global on/off flag.
+# See ../README.md and ../../capture/README.md.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-telemetry-alerts
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: odigos-telemetry
+    release: prometheus
+spec:
+  groups:
+    - name: odigos.telemetry.rules
+      rules:
+        # ---------------------------------------------------------------
+        # Logs being dropped by an Odigos collector's exporter pipeline.
+        # `otelcol_exporter_send_failed_log_records_total` increments on
+        # every log record the exporter could not send (after any retries).
+        # ---------------------------------------------------------------
+        - alert: OdigosPipelineLogsDropped
+          expr: |
+            sum by (k8s_namespace_name, k8s_pod_name) (
+              rate(
+                otelcol_exporter_send_failed_log_records_total{
+                  k8s_namespace_name=~"odigos-system"
+                }[5m]
+              )
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+            alert_type: pipeline
+            telemetry_type: logs
+            component: "odigos-telemetry"
+            service: "odigos"
+          annotations:
+            summary: "Odigos collector is dropping logs"
+            description: |
+              Pod {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_pod_name }}
+              is failing to export {{ $value | humanize }} log
+              records/sec to its destination over the last 5m.
+              Logs are being lost.
+            action: |
+              kubectl -n odigos-system logs {{ $labels.k8s_pod_name }} --tail=200
+              # Check destination availability and any backpressure errors in the logs.
+            prerequisite: "Requires Odigos own-metrics collection (destination odigosOwnMetricsEnabled or the bundled metrics store). See ../README.md."
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Metrics being dropped by an Odigos collector's exporter pipeline.
+        # ---------------------------------------------------------------
+        - alert: OdigosPipelineMetricsDropped
+          expr: |
+            sum by (k8s_namespace_name, k8s_pod_name) (
+              rate(
+                otelcol_exporter_send_failed_metric_points_total{
+                  k8s_namespace_name=~"odigos-system"
+                }[5m]
+              )
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+            alert_type: pipeline
+            telemetry_type: metrics
+            component: "odigos-telemetry"
+            service: "odigos"
+          annotations:
+            summary: "Odigos collector is dropping metric points"
+            description: |
+              Pod {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_pod_name }}
+              is failing to export {{ $value | humanize }} metric
+              points/sec over the last 5m. Metrics are being lost.
+            action: |
+              kubectl -n odigos-system logs {{ $labels.k8s_pod_name }} --tail=200
+            prerequisite: "Requires Odigos own-metrics collection (destination odigosOwnMetricsEnabled or the bundled metrics store). See ../README.md."
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Spans being dropped by an Odigos collector's exporter pipeline.
+        # ---------------------------------------------------------------
+        - alert: OdigosPipelineSpansDropped
+          expr: |
+            sum by (k8s_namespace_name, k8s_pod_name) (
+              rate(
+                otelcol_exporter_send_failed_spans_total{
+                  k8s_namespace_name=~"odigos-system"
+                }[5m]
+              )
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+            alert_type: pipeline
+            telemetry_type: spans
+            component: "odigos-telemetry"
+            service: "odigos"
+          annotations:
+            summary: "Odigos collector is dropping spans"
+            description: |
+              Pod {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_pod_name }}
+              is failing to export {{ $value | humanize }} spans/sec
+              over the last 5m. Traces are being lost.
+            action: |
+              kubectl -n odigos-system logs {{ $labels.k8s_pod_name }} --tail=200
+            prerequisite: "Requires Odigos own-metrics collection (destination odigosOwnMetricsEnabled or the bundled metrics store). See ../README.md."
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # A processor (typically memory_limiter or batch) is refusing
+        # data because downstream cannot keep up. This is the early
+        # warning that pipelineXDropped alerts will follow.
+        # ---------------------------------------------------------------
+        - alert: OdigosProcessorRefused
+          expr: |
+            sum by (k8s_namespace_name, k8s_pod_name, processor) (
+              rate(
+                otelcol_processor_refused_spans_total{k8s_namespace_name=~"odigos-system"}[5m]
+              )
+              + on (k8s_namespace_name, k8s_pod_name, processor)
+              rate(
+                otelcol_processor_refused_metric_points_total{k8s_namespace_name=~"odigos-system"}[5m]
+              )
+              + on (k8s_namespace_name, k8s_pod_name, processor)
+              rate(
+                otelcol_processor_refused_log_records_total{k8s_namespace_name=~"odigos-system"}[5m]
+              )
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+            alert_type: pipeline
+            component: "odigos-telemetry"
+            service: "odigos"
+          annotations:
+            summary: "Odigos collector processor is refusing data (backpressure)"
+            description: |
+              Processor {{ $labels.processor }} in pod
+              {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_pod_name }}
+              is refusing {{ $value | humanize }} items/sec
+              over the last 5m. Often `memory_limiter` —
+              consider increasing the gateway's memory limit or scaling
+              up replicas.
+            prerequisite: "Requires Odigos own-metrics collection (destination odigosOwnMetricsEnabled or the bundled metrics store). See ../README.md."
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Exporter queue is filling up — destination is back-pressuring
+        # or unreachable. About to start dropping.
+        # ---------------------------------------------------------------
+        - alert: OdigosExporterQueueNearFull
+          expr: |
+            (
+              otelcol_exporter_queue_size{k8s_namespace_name=~"odigos-system"}
+                /
+              otelcol_exporter_queue_capacity{k8s_namespace_name=~"odigos-system"}
+            ) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: pipeline
+            component: "odigos-telemetry"
+            service: "odigos"
+          annotations:
+            summary: "Odigos exporter queue is > 0.8 full"
+            description: |
+              Exporter queue in pod
+              {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_pod_name }}
+              is at {{ $value | humanizePercentage }} of capacity
+              for more than 10m. Destination is back-pressuring; expect
+              drops if this continues.
+            prerequisite: "Requires Odigos own-metrics collection (destination odigosOwnMetricsEnabled or the bundled metrics store). See ../README.md."
+            runbook_url: "https://docs.odigos.io/"

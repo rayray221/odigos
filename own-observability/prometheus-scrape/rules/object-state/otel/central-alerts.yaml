@@ -1,0 +1,271 @@
+# Odigos Central object-state alerts (central-proxy / central-backend /
+# central-ui) — OpenTelemetry k8sclusterreceiver (k8s_* metrics) source.
+# Rendered from the odigos-prometheus-alerts chart (components.central.enabled=true,
+# metricSource=otel); only the manifest is migrated, not the chart.
+#
+# NOTE: Central runs in its own cluster/namespace (odigos-central). This rule is
+# a no-op where Odigos Central is not deployed; apply it only on the central
+# cluster (and ensure Prometheus watches the odigos-central namespace).
+#
+# Object-state source: k8sclusterreceiver. Requires `clusterMetricsEnabled: true`
+# in the Odigos config (default false). Apply this OR the ksm/ set, not both.
+# See ./README.md for prerequisites and ../../../README.md for the capture method.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-central-alerts-otel
+  namespace: odigos-central
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: central
+    release: prometheus
+spec:
+  groups:
+    - name: central.deployments.otel.rules
+      rules:
+        - alert: CentralProxyNotAvailable
+          expr: |
+            k8s_deployment_available{
+              k8s_namespace_name=~"odigos-central", k8s_deployment_name=~"central-proxy"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "central-proxy"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-proxy has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_deployment_name }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more than
+              10m.
+            action: |
+              kubectl -n odigos-central get pods -l app.kubernetes.io/name=central-proxy
+              kubectl -n odigos-central describe deploy central-proxy
+            runbook_url: "https://docs.odigos.io/"
+        - alert: CentralProxyPodsCrashLooping
+          expr: |
+            count by (k8s_namespace_name) (
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_restarts_total{
+                    k8s_namespace_name=~"odigos-central",
+                    k8s_container_name=~"central-proxy"
+                  }
+                ) >= 3
+              )
+              and on (k8s_namespace_name, k8s_pod_name, k8s_container_name)
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_ready{
+                    k8s_namespace_name=~"odigos-central",
+                    k8s_container_name=~"central-proxy"
+                  }
+                ) == 0
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            approximation: "true"
+            component: "central-proxy"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-proxy pods are crash-looping (>= 1) [OTel approximation]"
+            description: |
+              {{ $value }} pod(s) of central-proxy in
+              namespace {{ $labels.k8s_namespace_name }}
+              have restarted at least 3 times and are currently not ready.
+              Approximates CrashLoopBackOff.
+            action: |
+              kubectl -n odigos-central logs deploy/central-proxy -c central-proxy --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        - alert: CentralProxyDeploymentAbsent
+          expr: |
+            absent(
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-central", k8s_deployment_name=~"central-proxy"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "central-proxy"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-proxy Deployment metrics absent (OTel)"
+            description: |
+              No `k8s_deployment_desired` series for namespace `odigos-central` /
+              deployment `central-proxy` for more than 15m.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: CentralBackendNotAvailable
+          expr: |
+            k8s_deployment_available{
+              k8s_namespace_name=~"odigos-central", k8s_deployment_name=~"central-backend"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "central-backend"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-backend has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_deployment_name }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more than
+              10m.
+            action: |
+              kubectl -n odigos-central get pods -l app.kubernetes.io/name=central-backend
+              kubectl -n odigos-central describe deploy central-backend
+            runbook_url: "https://docs.odigos.io/"
+        - alert: CentralBackendPodsCrashLooping
+          expr: |
+            count by (k8s_namespace_name) (
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_restarts_total{
+                    k8s_namespace_name=~"odigos-central",
+                    k8s_container_name=~"central-backend"
+                  }
+                ) >= 3
+              )
+              and on (k8s_namespace_name, k8s_pod_name, k8s_container_name)
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_ready{
+                    k8s_namespace_name=~"odigos-central",
+                    k8s_container_name=~"central-backend"
+                  }
+                ) == 0
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            approximation: "true"
+            component: "central-backend"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-backend pods are crash-looping (>= 1) [OTel approximation]"
+            description: |
+              {{ $value }} pod(s) of central-backend in
+              namespace {{ $labels.k8s_namespace_name }}
+              have restarted at least 3 times and are currently not ready.
+              Approximates CrashLoopBackOff.
+            action: |
+              kubectl -n odigos-central logs deploy/central-backend -c central-backend --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        - alert: CentralBackendDeploymentAbsent
+          expr: |
+            absent(
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-central", k8s_deployment_name=~"central-backend"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "central-backend"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-backend Deployment metrics absent (OTel)"
+            description: |
+              No `k8s_deployment_desired` series for namespace `odigos-central` /
+              deployment `central-backend` for more than 15m.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: CentralUiNotAvailable
+          expr: |
+            k8s_deployment_available{
+              k8s_namespace_name=~"odigos-central", k8s_deployment_name=~"central-ui"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "central-ui"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-ui has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_deployment_name }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more than
+              10m.
+            action: |
+              kubectl -n odigos-central get pods -l app.kubernetes.io/name=central-ui
+              kubectl -n odigos-central describe deploy central-ui
+            runbook_url: "https://docs.odigos.io/"
+        - alert: CentralUiPodsCrashLooping
+          expr: |
+            count by (k8s_namespace_name) (
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_restarts_total{
+                    k8s_namespace_name=~"odigos-central",
+                    k8s_container_name=~"central-ui"
+                  }
+                ) >= 3
+              )
+              and on (k8s_namespace_name, k8s_pod_name, k8s_container_name)
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_ready{
+                    k8s_namespace_name=~"odigos-central",
+                    k8s_container_name=~"central-ui"
+                  }
+                ) == 0
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            approximation: "true"
+            component: "central-ui"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-ui pods are crash-looping (>= 1) [OTel approximation]"
+            description: |
+              {{ $value }} pod(s) of central-ui in
+              namespace {{ $labels.k8s_namespace_name }}
+              have restarted at least 3 times and are currently not ready.
+              Approximates CrashLoopBackOff.
+            action: |
+              kubectl -n odigos-central logs deploy/central-ui -c central-ui --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        - alert: CentralUiDeploymentAbsent
+          expr: |
+            absent(
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-central", k8s_deployment_name=~"central-ui"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "central-ui"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos central-ui Deployment metrics absent (OTel)"
+            description: |
+              No `k8s_deployment_desired` series for namespace `odigos-central` /
+              deployment `central-ui` for more than 15m.
+            runbook_url: "https://docs.odigos.io/"

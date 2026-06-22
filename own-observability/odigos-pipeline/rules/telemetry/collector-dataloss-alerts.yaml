@@ -1,0 +1,311 @@
+# Odigos collector throughput / data-loss alerts — Odigos pipeline method.
+#
+# Label scheme: k8s_namespace_name / k8s_pod_name (OTLP resource attributes
+# promoted to Prometheus labels). Counters may gain `_total` on ingest; rules
+# match `(_total)?` so they work either way.
+#
+# Role is distinguished by pod name: node collector (DaemonSet) is
+# `odigos-data-collection-*`; cluster collector / gateway (Deployment) is
+# `odigos-gateway-*`. This requires k8s resource attributes to be promoted to
+# labels on the ingested series (Odigos's pipeline does this); if they live on a
+# separate target_info series instead, see ../README.md.
+#
+# PREREQUISITE — Odigos own-metrics must be collected (destination
+# `odigosOwnMetricsEnabled: true` and/or the bundled metrics store). Gateway
+# self-metrics specifically require the bundled metrics store enabled; the node
+# collector + agent push their metrics via OTLP independently. See ../README.md.
+#
+# Metric names validated against frontend/services/metrics/collector_metrics.go.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-collector-dataloss-alerts
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: odigos-telemetry
+    release: prometheus
+spec:
+  groups:
+    # ------------------------------------------------------------------------
+    # Node collector (DaemonSet odigos-data-collection-*) — data loss.
+    # ------------------------------------------------------------------------
+    - name: odigos.node-collector.dataloss.rules
+      rules:
+        - alert: OdigosNodeCollectorEbpfLostSamples
+          expr: |
+            sum by (k8s_pod_name) (
+              rate({__name__=~"otelcol_odigos_ebpf_lost_samples(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-data-collection-.+"}[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: odigos-node-collector
+            service: odigos
+          annotations:
+            summary: "Odigos node collector is losing eBPF samples (data dropped)"
+            description: |
+              Node collector pod {{ $labels.k8s_pod_name }} lost {{ $value | humanize }}
+              eBPF samples/sec over the last 5m. Telemetry is produced faster than
+              the collector can drain the eBPF buffer. Raise node collector
+              CPU/memory limits or reduce per-node load.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: OdigosNodeCollectorReceiverRefusingData
+          expr: |
+            sum by (k8s_pod_name) (
+              rate({__name__=~"otelcol_receiver_refused_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-data-collection-.+"}[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: odigos-node-collector
+            service: odigos
+          annotations:
+            summary: "Odigos node collector receiver is refusing data (data dropped)"
+            description: |
+              Node collector pod {{ $labels.k8s_pod_name }} refused {{ $value | humanize }}
+              items/sec at its receiver over the last 5m, usually due to memory
+              pressure or downstream backpressure.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: OdigosNodeCollectorMemoryRejections
+          expr: |
+            sum by (k8s_pod_name) (
+              rate({__name__=~"otelcol_odigos_collector_memory_limiter_batch_rejections(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-data-collection-.+"}[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: odigos-node-collector
+            service: odigos
+          annotations:
+            summary: "Odigos node collector is rejecting batches under memory pressure (data dropped)"
+            description: |
+              Node collector pod {{ $labels.k8s_pod_name }} rejected {{ $value | humanize }}
+              gRPC batches/sec due to its runtime memory limit over the last 5m.
+              With drop_on_overload enabled these batches are dropped. Increase the
+              node collector memory limit.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: OdigosNodeCollectorExportFailingToGateway
+          expr: |
+            sum by (k8s_pod_name) (
+              rate({__name__=~"otelcol_exporter_send_failed_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-data-collection-.+"}[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: odigos-node-collector
+            service: odigos
+          annotations:
+            summary: "Odigos node collector is failing to export to the gateway"
+            description: |
+              Node collector pod {{ $labels.k8s_pod_name }} failed to export
+              {{ $value | humanize }} items/sec to the cluster collector over the
+              last 5m. Check gateway health and the node->gateway connection.
+            runbook_url: "https://docs.odigos.io/"
+        # Leading indicator — fires before samples are lost.
+        - alert: OdigosNodeCollectorEbpfMemoryPressureHigh
+          expr: |
+            (
+              sum by (k8s_pod_name) (
+                rate({__name__=~"otelcol_ebpf_memory_pressure_wait_time(_milliseconds)?(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-data-collection-.+"}[5m])
+              ) / 1000
+            ) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+            component: odigos-node-collector
+            service: odigos
+          annotations:
+            summary: "Odigos node collector eBPF receiver under sustained memory pressure"
+            description: |
+              Node collector pod {{ $labels.k8s_pod_name }} spent {{ $value | humanizePercentage }}
+              of the last 10m blocked on memory pressure in the eBPF receiver. This
+              precedes lost samples — raise the node collector memory limit before
+              data is dropped.
+            runbook_url: "https://docs.odigos.io/"
+        # Agent-side (odiglet eBPF instrumentation) drops, before the collector.
+        - alert: OdigosInstrumentationAgentDroppingEvents
+          expr: |
+            sum by (k8s_pod_name) (
+              rate({__name__=~"odigos_(python|nodejs)_ebpf_instrumentation_(output_failed_events|events_too_larger)(_total)?", k8s_namespace_name=~"odigos-system"}[5m])
+            ) > 0
+          for: 10m
+          labels:
+            severity: warning
+            component: odigos-instrumentation-agent
+            service: odigos
+          annotations:
+            summary: "Odigos instrumentation agent is dropping events"
+            description: |
+              The instrumentation agent (pod {{ $labels.k8s_pod_name }}) dropped
+              {{ $value | humanize }} events/sec (failed to emit or too large) over
+              the last 10m. These events never reach the node collector.
+            runbook_url: "https://docs.odigos.io/"
+        # Normalized drop ratio: 100 * refused / (accepted + refused).
+        # tune: threshold `> 1` (percent) and `for: 15m` below.
+        - alert: OdigosNodeCollectorHighDropRatio
+          expr: |
+            100 *
+            (
+              sum by (k8s_pod_name) (rate({__name__=~"otelcol_receiver_refused_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-data-collection-.+"}[5m]))
+              /
+              clamp_min(
+                sum by (k8s_pod_name) (rate({__name__=~"otelcol_receiver_(accepted|refused)_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-data-collection-.+"}[5m])),
+                1
+              )
+            ) > 1
+          for: 15m
+          labels:
+            severity: warning
+            component: odigos-node-collector
+            service: odigos
+          annotations:
+            summary: "Odigos node collector sustained drop ratio > 1%"
+            description: |
+              Node collector pod {{ $labels.k8s_pod_name }} is refusing
+              {{ $value | humanize }}% of received telemetry over the last 15m
+              (refused / (accepted + refused)). Sustained proportional loss —
+              scale or raise limits on the node collector.
+            runbook_url: "https://docs.odigos.io/"
+    # ------------------------------------------------------------------------
+    # Cluster collector / gateway (Deployment odigos-gateway-*) — data loss.
+    # ------------------------------------------------------------------------
+    - name: odigos.gateway.dataloss.rules
+      rules:
+        - alert: OdigosGatewayMemoryRejections
+          expr: |
+            sum by (k8s_pod_name) (
+              rate({__name__=~"otelcol_odigos_collector_memory_limiter_batch_rejections(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-gateway-.+"}[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: odigos-gateway
+            service: odigos
+          annotations:
+            summary: "Odigos gateway is rejecting batches under memory pressure"
+            description: |
+              Gateway pod {{ $labels.k8s_pod_name }} rejected {{ $value | humanize }}
+              batches/sec due to its runtime memory limit over the last 5m. The
+              gateway is overloaded; it should scale out (check the HPA) or get a
+              higher memory limit / GOMEMLIMIT.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: OdigosGatewayReceiverRefusingData
+          expr: |
+            sum by (k8s_pod_name) (
+              rate({__name__=~"otelcol_receiver_refused_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-gateway-.+"}[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: odigos-gateway
+            service: odigos
+          annotations:
+            summary: "Odigos gateway receiver is refusing data (data dropped)"
+            description: |
+              Gateway pod {{ $labels.k8s_pod_name }} refused {{ $value | humanize }}
+              items/sec at its receiver over the last 5m. Incoming telemetry is
+              being rejected at ingest.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: OdigosGatewayExportFailures
+          expr: |
+            sum by (k8s_pod_name, exporter) (
+              rate({__name__=~"otelcol_exporter_send_failed_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-gateway-.+"}[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: odigos-gateway
+            service: odigos
+          annotations:
+            summary: "Odigos gateway is failing to export to a destination"
+            description: |
+              Gateway pod {{ $labels.k8s_pod_name }} failed to export {{ $value | humanize }}
+              items/sec to destination "{{ $labels.exporter }}" over the last 5m.
+              Check that backend's availability, credentials, and quota.
+            runbook_url: "https://docs.odigos.io/"
+        - alert: OdigosGatewayEnqueueFailures
+          expr: |
+            sum by (k8s_pod_name, exporter) (
+              rate({__name__=~"otelcol_exporter_enqueue_failed_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-gateway-.+"}[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            component: odigos-gateway
+            service: odigos
+          annotations:
+            summary: "Odigos gateway exporter queue is full (data dropped on enqueue)"
+            description: |
+              Gateway pod {{ $labels.k8s_pod_name }} failed to enqueue {{ $value | humanize }}
+              items/sec for destination "{{ $labels.exporter }}" over the last 5m.
+              The send queue is full, typically because the destination is slow or
+              down.
+            runbook_url: "https://docs.odigos.io/"
+        # Leading indicator — send queue saturating before enqueue failures.
+        - alert: OdigosGatewayExporterQueueSaturation
+          expr: |
+            (
+              max by (k8s_pod_name, exporter) ({__name__=~"otelcol_exporter_queue_size(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-gateway-.+"})
+              /
+              max by (k8s_pod_name, exporter) ({__name__=~"otelcol_exporter_queue_capacity(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-gateway-.+"})
+            ) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+            component: odigos-gateway
+            service: odigos
+          annotations:
+            summary: "Odigos gateway exporter queue is nearly full"
+            description: |
+              Gateway pod {{ $labels.k8s_pod_name }} send queue for destination
+              "{{ $labels.exporter }}" is {{ $value | humanizePercentage }} full over
+              the last 10m. Approaching enqueue failures — check destination
+              latency/throughput.
+            runbook_url: "https://docs.odigos.io/"
+        # CAVEAT: `odigos_gateway_rejections` is exposed by the Odigos autoscaler on
+        # the Kubernetes custom.metrics.k8s.io API (for the HPA). It is NOT funneled
+        # through the Odigos pipeline, so this rule only fires if you separately
+        # scrape that custom metric into your Prometheus. Otherwise rely on
+        # OdigosGatewayMemoryRejections above.
+        - alert: OdigosGatewayRejectionSignalActive
+          expr: odigos_gateway_rejections >= 0.5
+          for: 5m
+          labels:
+            severity: warning
+            component: odigos-gateway
+            service: odigos
+          annotations:
+            summary: "Odigos gateway fleet is in a rejecting state"
+            description: |
+              The Odigos autoscaler reports odigos_gateway_rejections={{ $value }}
+              (>= 0.5 means at least half of the gateway pods are rejecting data,
+              OOMKilled, or crash-looping). The gateway should be scaling up — verify
+              the HPA and pod resource limits.
+            prerequisite: "Requires scraping odigos_gateway_rejections from the custom.metrics.k8s.io API; not part of the Odigos pipeline."
+            runbook_url: "https://docs.odigos.io/"
+        # Normalized drop ratio: 100 * refused / (accepted + refused).
+        # tune: threshold `> 1` (percent) and `for: 15m` below.
+        - alert: OdigosGatewayHighDropRatio
+          expr: |
+            100 *
+            (
+              sum by (k8s_pod_name) (rate({__name__=~"otelcol_receiver_refused_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-gateway-.+"}[5m]))
+              /
+              clamp_min(
+                sum by (k8s_pod_name) (rate({__name__=~"otelcol_receiver_(accepted|refused)_(spans|metric_points|log_records)(_total)?", k8s_namespace_name=~"odigos-system", k8s_pod_name=~"odigos-gateway-.+"}[5m])),
+                1
+              )
+            ) > 1
+          for: 15m
+          labels:
+            severity: warning
+            component: odigos-gateway
+            service: odigos
+          annotations:
+            summary: "Odigos gateway sustained drop ratio > 1%"
+            description: |
+              Gateway pod {{ $labels.k8s_pod_name }} is refusing {{ $value | humanize }}% of
+              received telemetry over the last 15m (refused / (accepted + refused)).
+              Sustained proportional loss — scale the gateway or raise its limits.
+            runbook_url: "https://docs.odigos.io/"

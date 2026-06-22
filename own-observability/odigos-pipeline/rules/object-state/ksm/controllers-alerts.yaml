@@ -1,0 +1,264 @@
+# Odigos controller Deployments (autoscaler / scheduler / instrumentor)
+# object-state alerts — kube-state-metrics (kube_*) source.
+#
+# Object-state source: kube-state-metrics. Apply this OR the otel/ set, not both.
+# See ./README.md for prerequisites and ../../../README.md for the capture method.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-controllers-alerts-ksm
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: controllers
+    release: prometheus
+spec:
+  groups:
+    - name: controllers.deployments.ksm.rules
+      rules:
+        # ---------------------------------------------------------------
+        # Controller odigos-autoscaler: available < minAvailable (1)
+        # ---------------------------------------------------------------
+        - alert: AutoscalerNotAvailable
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace=~"odigos-system", deployment=~"odigos-autoscaler"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "odigos-autoscaler"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-autoscaler has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.namespace }}/{{ $labels.deployment }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more
+              than 10m. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-autoscaler
+              kubectl -n odigos-system describe deploy odigos-autoscaler
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-autoscaler pods in CrashLoopBackOff.
+        # ---------------------------------------------------------------
+        - alert: AutoscalerPodsCrashLooping
+          expr: |
+            count by (namespace) (
+              kube_pod_container_status_waiting_reason{
+                reason="CrashLoopBackOff",
+                namespace=~"odigos-system",
+                pod=~"odigos-autoscaler-.*",
+                container=~"odigos-autoscaler"
+              }
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            component: "odigos-autoscaler"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-autoscaler pods are in CrashLoopBackOff (>= 1)"
+            description: |
+              {{ $value }} pod(s) of odigos-autoscaler in
+              namespace {{ $labels.namespace }} have been
+              in CrashLoopBackOff for more than 5m.
+              Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-autoscaler
+              kubectl -n odigos-system logs deploy/odigos-autoscaler -c odigos-autoscaler --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-autoscaler Deployment metric missing.
+        # ---------------------------------------------------------------
+        - alert: AutoscalerDeploymentAbsent
+          expr: |
+            absent(
+              kube_deployment_spec_replicas{
+                namespace=~"odigos-system", deployment=~"odigos-autoscaler"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "odigos-autoscaler"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-autoscaler Deployment metrics absent"
+            description: |
+              No `kube_deployment_spec_replicas` series for
+              namespace `odigos-system` / deployment `odigos-autoscaler` for more
+              than 15m. Either the Deployment was deleted or
+              kube-state-metrics is not being scraped.
+            action: |
+              kubectl -n odigos-system get deploy odigos-autoscaler
+              kubectl get pods -A -l app.kubernetes.io/name=kube-state-metrics
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-scheduler: available < minAvailable (1)
+        # ---------------------------------------------------------------
+        - alert: SchedulerNotAvailable
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace=~"odigos-system", deployment=~"odigos-scheduler"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "odigos-scheduler"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-scheduler has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.namespace }}/{{ $labels.deployment }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more
+              than 10m. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-scheduler
+              kubectl -n odigos-system describe deploy odigos-scheduler
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-scheduler pods in CrashLoopBackOff.
+        # ---------------------------------------------------------------
+        - alert: SchedulerPodsCrashLooping
+          expr: |
+            count by (namespace) (
+              kube_pod_container_status_waiting_reason{
+                reason="CrashLoopBackOff",
+                namespace=~"odigos-system",
+                pod=~"odigos-scheduler-.*",
+                container=~"odigos-scheduler"
+              }
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            component: "odigos-scheduler"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-scheduler pods are in CrashLoopBackOff (>= 1)"
+            description: |
+              {{ $value }} pod(s) of odigos-scheduler in
+              namespace {{ $labels.namespace }} have been
+              in CrashLoopBackOff for more than 5m.
+              Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-scheduler
+              kubectl -n odigos-system logs deploy/odigos-scheduler -c odigos-scheduler --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-scheduler Deployment metric missing.
+        # ---------------------------------------------------------------
+        - alert: SchedulerDeploymentAbsent
+          expr: |
+            absent(
+              kube_deployment_spec_replicas{
+                namespace=~"odigos-system", deployment=~"odigos-scheduler"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "odigos-scheduler"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-scheduler Deployment metrics absent"
+            description: |
+              No `kube_deployment_spec_replicas` series for
+              namespace `odigos-system` / deployment `odigos-scheduler` for more
+              than 15m. Either the Deployment was deleted or
+              kube-state-metrics is not being scraped.
+            action: |
+              kubectl -n odigos-system get deploy odigos-scheduler
+              kubectl get pods -A -l app.kubernetes.io/name=kube-state-metrics
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-instrumentor: available < minAvailable (1)
+        # ---------------------------------------------------------------
+        - alert: InstrumentorNotAvailable
+          expr: |
+            kube_deployment_status_replicas_available{
+              namespace=~"odigos-system", deployment=~"odigos-instrumentor"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "odigos-instrumentor"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-instrumentor has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.namespace }}/{{ $labels.deployment }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more
+              than 10m. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-instrumentor
+              kubectl -n odigos-system describe deploy odigos-instrumentor
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-instrumentor pods in CrashLoopBackOff.
+        # ---------------------------------------------------------------
+        - alert: InstrumentorPodsCrashLooping
+          expr: |
+            count by (namespace) (
+              kube_pod_container_status_waiting_reason{
+                reason="CrashLoopBackOff",
+                namespace=~"odigos-system",
+                pod=~"odigos-instrumentor-.*",
+                container=~"odigos-instrumentor"
+              }
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            component: "odigos-instrumentor"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-instrumentor pods are in CrashLoopBackOff (>= 1)"
+            description: |
+              {{ $value }} pod(s) of odigos-instrumentor in
+              namespace {{ $labels.namespace }} have been
+              in CrashLoopBackOff for more than 5m.
+              Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-instrumentor
+              kubectl -n odigos-system logs deploy/odigos-instrumentor -c odigos-instrumentor --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-instrumentor Deployment metric missing.
+        # ---------------------------------------------------------------
+        - alert: InstrumentorDeploymentAbsent
+          expr: |
+            absent(
+              kube_deployment_spec_replicas{
+                namespace=~"odigos-system", deployment=~"odigos-instrumentor"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "odigos-instrumentor"
+            service: "odigos"
+          annotations:
+            summary: "Odigos odigos-instrumentor Deployment metrics absent"
+            description: |
+              No `kube_deployment_spec_replicas` series for
+              namespace `odigos-system` / deployment `odigos-instrumentor` for more
+              than 15m. Either the Deployment was deleted or
+              kube-state-metrics is not being scraped.
+            action: |
+              kubectl -n odigos-system get deploy odigos-instrumentor
+              kubectl get pods -A -l app.kubernetes.io/name=kube-state-metrics
+            runbook_url: "https://docs.odigos.io/"

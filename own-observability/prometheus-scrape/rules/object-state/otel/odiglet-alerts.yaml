@@ -1,0 +1,198 @@
+# Odiglet DaemonSet object-state alerts — OpenTelemetry k8sclusterreceiver
+# (k8s_* metrics, after OTLP translation) source.
+#
+# Object-state source: k8sclusterreceiver. Requires `clusterMetricsEnabled: true`
+# in the Odigos config (default false). Apply this OR the ksm/ set, not both.
+# See ./README.md for prerequisites and ../../../README.md for the capture method.
+#
+# Counter metric assumption: Prometheus OTLP/remote-write translation adds
+# `_total` to monotonic sums. If your pipeline does NOT add `_total`,
+# search-replace `_total` -> "" throughout this file.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-odiglet-alerts-otel
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: odiglet
+    release: prometheus
+spec:
+  groups:
+    - name: odiglet.daemonset.otel.rules
+      rules:
+
+        # CrashLoopBackOff *approximation* — see ./README.md for caveats.
+        # Tunable inline:
+        #   restartsThreshold = 3 (after ">= " on the restarts line)
+        #   threshold         = 1 (after ">= " on the count line)
+        # k8sclusterreceiver cycles `container_id` on every restart, so
+        # `rate()`/`increase()` per series always return ~0. We aggregate
+        # the container_id/image cardinality away with `max without (...)`
+        # to get a stable per-pod cumulative restart series, then gate it
+        # on current readiness.
+        - alert: OdigletPodsCrashLooping
+          expr: |
+            count by (k8s_namespace_name) (
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_restarts_total{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odiglet"
+                  }
+                ) >= 3
+              )
+              and on (k8s_namespace_name, k8s_pod_name, k8s_container_name)
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_ready{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odiglet"
+                  }
+                ) == 0
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            service: odigos
+            component: odiglet
+            source: otel-k8sclusterreceiver
+            alert_type: crashloop
+            approximation: "true"
+          annotations:
+            summary: "Odiglet pods are crash-looping (>= 1) [OTel approximation]"
+            description: |
+              {{ $value }} pod(s) in namespace {{ $labels.k8s_namespace_name }} with container
+              `odiglet` have restarted >= 3 times in 10m and are currently not ready.
+              This approximates CrashLoopBackOff (k8sclusterreceiver does not
+              expose container waiting reasons).
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odiglet
+              kubectl -n odigos-system describe ds odiglet
+              kubectl -n odigos-system logs ds/odiglet --previous --tail=200
+            runbook_url: https://docs.odigos.io/
+
+        - alert: OdigletDaemonSetNotScheduled
+          expr: |
+            k8s_daemonset_desired_scheduled_nodes{k8s_namespace_name=~"odigos-system", k8s_daemonset_name=~"odiglet"}
+              -
+            k8s_daemonset_current_scheduled_nodes{k8s_namespace_name=~"odigos-system", k8s_daemonset_name=~"odiglet"}
+              > 0
+          for: 10m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            source: otel-k8sclusterreceiver
+            alert_type: scheduling
+          annotations:
+            summary: "Odiglet DaemonSet has pods not scheduled"
+            description: |
+              {{ $value }} pod(s) of DaemonSet {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_daemonset_name }}
+              are not scheduled for more than 10m.
+
+        - alert: OdigletDaemonSetMisScheduled
+          expr: |
+            k8s_daemonset_misscheduled_nodes{k8s_namespace_name=~"odigos-system", k8s_daemonset_name=~"odiglet"} > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            source: otel-k8sclusterreceiver
+            alert_type: scheduling
+          annotations:
+            summary: "Odiglet DaemonSet has mis-scheduled pods"
+            description: |
+              {{ $value }} pod(s) of DaemonSet {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_daemonset_name }}
+              are mis-scheduled.
+
+        # DEGRADED: no `updated_number_scheduled` exists in k8sclusterreceiver.
+        # Falls back to "ready != desired for 30m". Tune `for` >> notReady.for.
+        - alert: OdigletDaemonSetRolloutStuck
+          expr: |
+            k8s_daemonset_ready_nodes{k8s_namespace_name=~"odigos-system", k8s_daemonset_name=~"odiglet"}
+              !=
+            k8s_daemonset_desired_scheduled_nodes{k8s_namespace_name=~"odigos-system", k8s_daemonset_name=~"odiglet"}
+          for: 30m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            source: otel-k8sclusterreceiver
+            alert_type: rollout
+            approximation: "true"
+          annotations:
+            summary: "Odiglet DaemonSet rollout appears stuck [OTel approximation]"
+            description: |
+              ready_nodes != desired_scheduled_nodes for more than 30m on
+              DaemonSet {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_daemonset_name }}.
+              k8sclusterreceiver does not expose `updated_number_scheduled`,
+              so this may also fire on long unhealthy states (not strictly rollouts).
+
+        - alert: OdigletDaemonSetNotReady
+          expr: |
+            k8s_daemonset_ready_nodes{k8s_namespace_name=~"odigos-system", k8s_daemonset_name=~"odiglet"}
+              <
+            k8s_daemonset_desired_scheduled_nodes{k8s_namespace_name=~"odigos-system", k8s_daemonset_name=~"odiglet"}
+          for: 10m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            source: otel-k8sclusterreceiver
+            alert_type: readiness
+          annotations:
+            summary: "Odiglet DaemonSet has unready pods"
+            description: |
+              DaemonSet {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_daemonset_name }} has fewer ready nodes
+              ({{ $value }}) than desired for more than 10m.
+
+        # Same container_id-cycling caveat as OdigletPodsCrashLooping;
+        # we collapse the cardinality with `max without (...)` before
+        # computing rate via a subquery.
+        - alert: OdigletContainerHighRestartRate
+          expr: |
+            rate(
+              max without (container_id, container_image_name, container_image_tag) (
+                k8s_container_restarts_total{
+                  k8s_namespace_name=~"odigos-system",
+                  k8s_container_name=~"odiglet"
+                }
+              )[15m:1m]
+            ) > 0.0166
+          for: 10m
+          labels:
+            severity: warning
+            service: odigos
+            component: odiglet
+            source: otel-k8sclusterreceiver
+            alert_type: restarts
+          annotations:
+            summary: "Odiglet container restarting frequently"
+            description: |
+              Container {{ $labels.k8s_container_name }} in pod {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_pod_name }}
+              has restarted at {{ $value | humanize }} per second over the last 15m.
+
+        - alert: OdigletDaemonSetAbsent
+          expr: |
+            absent(
+              k8s_daemonset_desired_scheduled_nodes{
+                k8s_namespace_name=~"odigos-system", k8s_daemonset_name=~"odiglet"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            service: odigos
+            component: odiglet
+            source: otel-k8sclusterreceiver
+            alert_type: absent
+          annotations:
+            summary: "Odiglet DaemonSet metrics absent (OTel)"
+            description: |
+              No `k8s_daemonset_desired_scheduled_nodes` series for namespace
+              `odigos-system` / daemonset `odiglet` for more than 15m. Either the
+              DaemonSet was deleted, the OTel Collector running
+              k8sclusterreceiver is down, or its pipeline to Prometheus is broken.

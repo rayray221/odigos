@@ -1,0 +1,162 @@
+# Odigos gateway (cluster collector) Deployment object-state alerts —
+# OpenTelemetry k8sclusterreceiver (k8s_* metrics) source.
+#
+# Object-state source: k8sclusterreceiver. Requires `clusterMetricsEnabled: true`
+# in the Odigos config (default false). Apply this OR the ksm/ set, not both.
+# See ./README.md for prerequisites and ../../../README.md for the capture method.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-gateway-alerts-otel
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: gateway
+    release: prometheus
+spec:
+  groups:
+    - name: gateway.deployment.otel.rules
+      rules:
+        # ---------------------------------------------------------------
+        # OTel equivalent using k8sclusterreceiver
+        # `k8s_deployment_available` / `k8s_deployment_desired`.
+        # Mode=ratio. tune: change the `< 0.5` threshold to taste.
+        # ---------------------------------------------------------------
+        - alert: GatewayNotEnoughAvailable
+          expr: |
+            (
+              k8s_deployment_available{
+                k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-gateway"
+              }
+                /
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-gateway"
+              }
+            ) < 0.5
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: availability
+            availability_mode: "ratio"
+            component: "gateway"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos gateway does not have enough available replicas (mode=ratio)"
+            description: |
+              Deployment {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_deployment_name }}
+              has available/desired ratio = {{ $value | humanize }}
+              (threshold: < 0.5) for more than 5m.
+              Gateway throughput is proportionally reduced.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-gateway
+              kubectl -n odigos-system describe deploy odigos-gateway
+              kubectl -n odigos-system rollout status deploy/odigos-gateway
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # CrashLoopBackOff *approximation* (same caveat as odiglet):
+        # k8sclusterreceiver has no `container_status_waiting_reason`
+        # metric, and per-series `increase()` returns ~0 because
+        # `container_id` cycles every restart. We collapse the
+        # cardinality with `max without (...)` to get a stable per-pod
+        # cumulative restart series.
+        # ---------------------------------------------------------------
+        - alert: GatewayPodsCrashLooping
+          expr: |
+            count by (k8s_namespace_name) (
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_restarts_total{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odigos-gateway"
+                  }
+                ) >= 3
+              )
+              and on (k8s_namespace_name, k8s_pod_name, k8s_container_name)
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_ready{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odigos-gateway"
+                  }
+                ) == 0
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            approximation: "true"
+            component: "gateway"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos gateway pods are crash-looping (>= 1) [OTel approximation]"
+            description: |
+              {{ $value }} gateway pod(s) in namespace
+              {{ $labels.k8s_namespace_name }} with container
+              `odigos-gateway` have restarted at least 3 times and are currently not ready.
+              Approximates CrashLoopBackOff.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-gateway
+              kubectl -n odigos-system logs deploy/odigos-gateway -c odigos-gateway --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # OTel restart-rate alert. Same `max without (...)` cardinality
+        # collapse + subquery pattern as the odiglet equivalent.
+        # ---------------------------------------------------------------
+        - alert: GatewayContainerHighRestartRate
+          expr: |
+            rate(
+              max without (container_id, container_image_name, container_image_tag) (
+                k8s_container_restarts_total{
+                  k8s_namespace_name=~"odigos-system",
+                  k8s_container_name=~"odigos-gateway"
+                }
+              )[15m:1m]
+            ) > 0.0166
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: restarts
+            component: "gateway"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos gateway container restarting frequently"
+            description: |
+              Container {{ $labels.k8s_container_name }} in pod
+              {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_pod_name }}
+              has restarted at {{ $value | humanize }} per second
+              over the last 15m.
+            action: |
+              kubectl -n odigos-system logs {{ $labels.k8s_pod_name }} -c odigos-gateway --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # The k8sclusterreceiver Deployment metric is missing.
+        # ---------------------------------------------------------------
+        - alert: GatewayDeploymentAbsent
+          expr: |
+            absent(
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-gateway"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "gateway"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos gateway Deployment metrics absent (OTel)"
+            description: |
+              No `k8s_deployment_desired` series for namespace `odigos-system` /
+              deployment `odigos-gateway` for more than 15m. Either the
+              Deployment was deleted, the OTel Collector running
+              k8sclusterreceiver is down, or its pipeline to Prometheus is broken.
+            action: |
+              kubectl -n odigos-system get deploy odigos-gateway
+              kubectl get pods -A -l app.kubernetes.io/name=opentelemetry-collector
+            runbook_url: "https://docs.odigos.io/"

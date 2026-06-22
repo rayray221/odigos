@@ -1,0 +1,82 @@
+import GettingHelp from '/snippets/shared/getting-help-section.mdx'
+
+## Overview
+
+Odigos can be monitored like any other workload in your cluster. The
+[`own-observability/`](https://github.com/odigos-io/odigos/tree/main/own-observability)
+directory in the Odigos repository ships ready-to-apply Prometheus Operator
+manifests — `ServiceMonitor` capture config and `PrometheusRule` alerts — that
+watch the health of Odigos itself:
+
+- **Control plane** — odiglet (DaemonSet), gateway, controllers (autoscaler,
+  scheduler, instrumentor), UI, and Central: availability, crashloop,
+  scheduling/rollout, and metric-absence.
+- **Collector pipeline** — throughput and data loss across the node collector and
+  the cluster gateway: receiver refusals, eBPF lost samples, memory-limiter
+  rejections, export/enqueue failures, queue saturation, agent-side drops, and a
+  normalized "% dropped" ratio.
+
+<Info>
+  These manifests live in the Odigos repository, not in the docs site. This page
+  is a high-level map; follow the links into the
+  [`own-observability/`](https://github.com/odigos-io/odigos/tree/main/own-observability)
+  READMEs for the exact files, prerequisites, and tunable thresholds.
+</Info>
+
+## Choose a capture method
+
+The manifests are organized by **how Odigos's own metrics reach Prometheus**.
+Pick one method — each folder is self-contained (capture config + matching rules):
+
+| Method | How Odigos telemetry is captured | `otelcol_*` label scheme |
+| --- | --- | --- |
+| **Prometheus scrape** | The Prometheus Operator scrapes the Odigos `/metrics` endpoints directly (ServiceMonitors). | `namespace` / `pod` |
+| **Odigos pipeline** | Odigos routes its own metrics through the OTLP own-metrics pipeline to your backend. | `k8s_namespace_name` / `k8s_pod_name` |
+
+- [Prometheus scrape method →](https://github.com/odigos-io/odigos/blob/main/own-observability/prometheus-scrape/README.md)
+- [Odigos pipeline method →](https://github.com/odigos-io/odigos/blob/main/own-observability/odigos-pipeline/README.md)
+
+Don't apply both methods at once — the rules would double-fire.
+
+## Choose an object-state source (independent)
+
+Component up/down/crashloop alerts read Kubernetes object-state metrics from one
+of two sources, independent of the capture method above. Both methods ship both
+flavors:
+
+- **kube-state-metrics** (`kube_*`) — use the `object-state/ksm/` set.
+- **OpenTelemetry k8sclusterreceiver** (`k8s_*`) — use the `object-state/otel/`
+  set. Requires `clusterMetricsEnabled: true` in the Odigos config (default
+  `false`).
+
+## Prerequisites at a glance
+
+- **Prometheus Operator** must select these objects. Every manifest carries the
+  label `release: prometheus`; set your `serviceMonitorSelector` / `ruleSelector`
+  accordingly. See the
+  [capture README](https://github.com/odigos-io/odigos/blob/main/own-observability/prometheus-scrape/capture/README.md).
+- For the **Odigos pipeline** method, Odigos own-metrics must be collected:
+  enable a metrics destination with `odigosOwnMetricsEnabled: true` and/or the
+  bundled Odigos metrics store. Gateway self-metrics specifically require the
+  bundled metrics store enabled; the node collector and agents push their metrics
+  via OTLP independently. (There is no single global on/off flag — only the scrape
+  `interval` is globally configurable.)
+
+## Collector data-loss & drop-ratio alerts
+
+The most operationally important alerts cover pipeline data loss for the node and
+cluster collectors, including both absolute (`> 0`) drop signals and a normalized
+`% dropped` ratio (default `> 1%` for `15m`, tunable inline since these are static
+manifests). See the telemetry README for each method:
+
+- [Prometheus scrape — collector telemetry & data loss →](https://github.com/odigos-io/odigos/blob/main/own-observability/prometheus-scrape/rules/telemetry/README.md)
+- [Odigos pipeline — collector telemetry & data loss →](https://github.com/odigos-io/odigos/blob/main/own-observability/odigos-pipeline/rules/telemetry/README.md)
+
+## Where to go next
+
+Start at the
+[`own-observability/` overview](https://github.com/odigos-io/odigos/blob/main/own-observability/README.md),
+which explains the two methods and how to choose, then navigate down into the
+method, capture, and rules READMEs for apply commands and tuning guidance.
+
+<GettingHelp />

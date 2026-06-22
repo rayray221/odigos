@@ -1,0 +1,143 @@
+# Odigos gateway (cluster collector) Deployment object-state alerts —
+# kube-state-metrics (kube_*) source.
+#
+# Object-state source: kube-state-metrics. Apply this OR the otel/ set, not both.
+# See ./README.md for prerequisites and ../../../README.md for the capture method.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-gateway-alerts-ksm
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: gateway
+    release: prometheus
+spec:
+  groups:
+    - name: gateway.deployment.ksm.rules
+      rules:
+        # ---------------------------------------------------------------
+        # Configurable "available vs desired" alert. Mode=ratio.
+        # Loss of gateway replicas drops the cluster's effective span /
+        # metric / log throughput proportionally.
+        # tune: change the `< 0.5` ratio threshold to taste.
+        # ---------------------------------------------------------------
+        - alert: GatewayNotEnoughAvailable
+          expr: |
+            (
+              kube_deployment_status_replicas_available{
+                namespace=~"odigos-system", deployment=~"odigos-gateway"
+              }
+                /
+              kube_deployment_spec_replicas{
+                namespace=~"odigos-system", deployment=~"odigos-gateway"
+              }
+            ) < 0.5
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: availability
+            availability_mode: "ratio"
+            component: "gateway"
+            service: "odigos"
+          annotations:
+            summary: "Odigos gateway does not have enough available replicas (mode=ratio)"
+            description: |
+              Deployment {{ $labels.namespace }}/{{ $labels.deployment }}
+              has available/desired ratio = {{ $value | humanize }}
+              (threshold: < 0.5) for more than 5m.
+              Gateway throughput is proportionally reduced.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-gateway
+              kubectl -n odigos-system describe deploy odigos-gateway
+              kubectl -n odigos-system rollout status deploy/odigos-gateway
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Gateway pods in CrashLoopBackOff. Joins on the deployment's
+        # ReplicaSet via name prefix so we don't have to chain
+        # ReplicaSet -> Deployment owner relationships.
+        # ---------------------------------------------------------------
+        - alert: GatewayPodsCrashLooping
+          expr: |
+            count by (namespace) (
+              kube_pod_container_status_waiting_reason{
+                reason="CrashLoopBackOff",
+                namespace=~"odigos-system",
+                pod=~"odigos-gateway-.*",
+                container=~"odigos-gateway"
+              }
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            component: "gateway"
+            service: "odigos"
+          annotations:
+            summary: "Odigos gateway pods are in CrashLoopBackOff (>= 1)"
+            description: |
+              {{ $value }} gateway pod(s) in namespace
+              {{ $labels.namespace }} have been in
+              CrashLoopBackOff for more than 5m.
+              Gateway throughput is reduced.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-gateway
+              kubectl -n odigos-system logs deploy/odigos-gateway -c odigos-gateway --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Leading indicator: gateway container restarting frequently
+        # but not yet in CrashLoopBackOff.
+        # ---------------------------------------------------------------
+        - alert: GatewayContainerHighRestartRate
+          expr: |
+            rate(
+              kube_pod_container_status_restarts_total{
+                namespace=~"odigos-system",
+                pod=~"odigos-gateway-.*",
+                container=~"odigos-gateway"
+              }[15m]
+            ) > 0.0166
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: restarts
+            component: "gateway"
+            service: "odigos"
+          annotations:
+            summary: "Odigos gateway container restarting frequently"
+            description: |
+              Container {{ $labels.container }} in pod
+              {{ $labels.namespace }}/{{ $labels.pod }}
+              has restarted at {{ $value | humanize }} per second
+              over the last 15m.
+            action: |
+              kubectl -n odigos-system logs {{ $labels.pod }} -c odigos-gateway --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # The Deployment spec metric is missing — Deployment deleted,
+        # kube-state-metrics down, or scrape misconfigured.
+        # ---------------------------------------------------------------
+        - alert: GatewayDeploymentAbsent
+          expr: |
+            absent(
+              kube_deployment_spec_replicas{
+                namespace=~"odigos-system", deployment=~"odigos-gateway"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "gateway"
+            service: "odigos"
+          annotations:
+            summary: "Odigos gateway Deployment metrics absent"
+            description: |
+              No `kube_deployment_spec_replicas` series for
+              namespace `odigos-system` / deployment `odigos-gateway` for more
+              than 15m. Either the Deployment was deleted or
+              kube-state-metrics is not being scraped.
+            action: |
+              kubectl -n odigos-system get deploy odigos-gateway
+              kubectl get pods -A -l app.kubernetes.io/name=kube-state-metrics
+            runbook_url: "https://docs.odigos.io/"

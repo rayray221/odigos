@@ -238,7 +238,8 @@
                     "group": "Advanced",
                     "icon": "sliders",
                     "pages": [
-                      "oss/pipeline/service-graph"
+                      "oss/pipeline/service-graph",
+                      "oss/pipeline/alerting"
                     ]
                   }
                 ]
@@ -565,7 +566,8 @@
                     "group": "Advanced",
                     "icon": "sliders",
                     "pages": [
-                      "enterprise/pipeline/service-graph"
+                      "enterprise/pipeline/service-graph",
+                      "enterprise/pipeline/alerting"
                     ]
                   }
                 ]

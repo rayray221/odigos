@@ -1,0 +1,313 @@
+# Odigos controller Deployments (autoscaler / scheduler / instrumentor)
+# object-state alerts — OpenTelemetry k8sclusterreceiver (k8s_* metrics) source.
+#
+# Object-state source: k8sclusterreceiver. Requires `clusterMetricsEnabled: true`
+# in the Odigos config (default false). Apply this OR the ksm/ set, not both.
+# See ./README.md for prerequisites and ../../../README.md for the capture method.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: odigos-controllers-alerts-otel
+  namespace: odigos-system
+  labels:
+    app.kubernetes.io/part-of: odigos
+    app.kubernetes.io/component: controllers
+    release: prometheus
+spec:
+  groups:
+    - name: controllers.deployments.otel.rules
+      rules:
+        # ---------------------------------------------------------------
+        # Controller odigos-autoscaler: available < minAvailable (1).
+        # ---------------------------------------------------------------
+        - alert: AutoscalerNotAvailable
+          expr: |
+            k8s_deployment_available{
+              k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-autoscaler"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "odigos-autoscaler"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-autoscaler has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_deployment_name }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more
+              than 10m. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-autoscaler
+              kubectl -n odigos-system describe deploy odigos-autoscaler
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-autoscaler crash-looping (OTel approximation).
+        # ---------------------------------------------------------------
+        - alert: AutoscalerPodsCrashLooping
+          expr: |
+            count by (k8s_namespace_name) (
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_restarts_total{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odigos-autoscaler"
+                  }
+                ) >= 3
+              )
+              and on (k8s_namespace_name, k8s_pod_name, k8s_container_name)
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_ready{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odigos-autoscaler"
+                  }
+                ) == 0
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            approximation: "true"
+            component: "odigos-autoscaler"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-autoscaler pods are crash-looping (>= 1) [OTel approximation]"
+            description: |
+              {{ $value }} pod(s) of odigos-autoscaler in
+              namespace {{ $labels.k8s_namespace_name }}
+              have restarted at least 3 times and are currently not ready.
+              Approximates CrashLoopBackOff. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-autoscaler
+              kubectl -n odigos-system logs deploy/odigos-autoscaler -c odigos-autoscaler --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-autoscaler k8sclusterreceiver metric missing.
+        # ---------------------------------------------------------------
+        - alert: AutoscalerDeploymentAbsent
+          expr: |
+            absent(
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-autoscaler"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "odigos-autoscaler"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-autoscaler Deployment metrics absent (OTel)"
+            description: |
+              No `k8s_deployment_desired` series for namespace `odigos-system` /
+              deployment `odigos-autoscaler` for more than 15m. Either
+              the Deployment was deleted, the OTel Collector running
+              k8sclusterreceiver is down, or its pipeline to Prometheus is
+              broken.
+            action: |
+              kubectl -n odigos-system get deploy odigos-autoscaler
+              kubectl get pods -A -l app.kubernetes.io/name=opentelemetry-collector
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-scheduler: available < minAvailable (1).
+        # ---------------------------------------------------------------
+        - alert: SchedulerNotAvailable
+          expr: |
+            k8s_deployment_available{
+              k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-scheduler"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "odigos-scheduler"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-scheduler has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_deployment_name }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more
+              than 10m. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-scheduler
+              kubectl -n odigos-system describe deploy odigos-scheduler
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-scheduler crash-looping (OTel approximation).
+        # ---------------------------------------------------------------
+        - alert: SchedulerPodsCrashLooping
+          expr: |
+            count by (k8s_namespace_name) (
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_restarts_total{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odigos-scheduler"
+                  }
+                ) >= 3
+              )
+              and on (k8s_namespace_name, k8s_pod_name, k8s_container_name)
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_ready{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odigos-scheduler"
+                  }
+                ) == 0
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            approximation: "true"
+            component: "odigos-scheduler"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-scheduler pods are crash-looping (>= 1) [OTel approximation]"
+            description: |
+              {{ $value }} pod(s) of odigos-scheduler in
+              namespace {{ $labels.k8s_namespace_name }}
+              have restarted at least 3 times and are currently not ready.
+              Approximates CrashLoopBackOff. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-scheduler
+              kubectl -n odigos-system logs deploy/odigos-scheduler -c odigos-scheduler --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-scheduler k8sclusterreceiver metric missing.
+        # ---------------------------------------------------------------
+        - alert: SchedulerDeploymentAbsent
+          expr: |
+            absent(
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-scheduler"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "odigos-scheduler"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-scheduler Deployment metrics absent (OTel)"
+            description: |
+              No `k8s_deployment_desired` series for namespace `odigos-system` /
+              deployment `odigos-scheduler` for more than 15m. Either
+              the Deployment was deleted, the OTel Collector running
+              k8sclusterreceiver is down, or its pipeline to Prometheus is
+              broken.
+            action: |
+              kubectl -n odigos-system get deploy odigos-scheduler
+              kubectl get pods -A -l app.kubernetes.io/name=opentelemetry-collector
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-instrumentor: available < minAvailable (1).
+        # ---------------------------------------------------------------
+        - alert: InstrumentorNotAvailable
+          expr: |
+            k8s_deployment_available{
+              k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-instrumentor"
+            } < 1
+          for: 10m
+          labels:
+            severity: warning
+            alert_type: availability
+            component: "odigos-instrumentor"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-instrumentor has fewer than 1 available replica(s)"
+            description: |
+              Deployment {{ $labels.k8s_namespace_name }}/{{ $labels.k8s_deployment_name }}
+              has only {{ $value }} available replica(s),
+              below the configured minimum of 1 for more
+              than 10m. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-instrumentor
+              kubectl -n odigos-system describe deploy odigos-instrumentor
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-instrumentor crash-looping (OTel approximation).
+        # ---------------------------------------------------------------
+        - alert: InstrumentorPodsCrashLooping
+          expr: |
+            count by (k8s_namespace_name) (
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_restarts_total{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odigos-instrumentor"
+                  }
+                ) >= 3
+              )
+              and on (k8s_namespace_name, k8s_pod_name, k8s_container_name)
+              (
+                max without (container_id, container_image_name, container_image_tag) (
+                  k8s_container_ready{
+                    k8s_namespace_name=~"odigos-system",
+                    k8s_container_name=~"odigos-instrumentor"
+                  }
+                ) == 0
+              )
+            ) >= 1
+          for: 5m
+          labels:
+            severity: critical
+            alert_type: crashloop
+            approximation: "true"
+            component: "odigos-instrumentor"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-instrumentor pods are crash-looping (>= 1) [OTel approximation]"
+            description: |
+              {{ $value }} pod(s) of odigos-instrumentor in
+              namespace {{ $labels.k8s_namespace_name }}
+              have restarted at least 3 times and are currently not ready.
+              Approximates CrashLoopBackOff. Odigos reconciliation is degraded.
+            action: |
+              kubectl -n odigos-system get pods -l app.kubernetes.io/name=odigos-instrumentor
+              kubectl -n odigos-system logs deploy/odigos-instrumentor -c odigos-instrumentor --previous --tail=200
+            runbook_url: "https://docs.odigos.io/"
+        # ---------------------------------------------------------------
+        # Controller odigos-instrumentor k8sclusterreceiver metric missing.
+        # ---------------------------------------------------------------
+        - alert: InstrumentorDeploymentAbsent
+          expr: |
+            absent(
+              k8s_deployment_desired{
+                k8s_namespace_name=~"odigos-system", k8s_deployment_name=~"odigos-instrumentor"
+              }
+            )
+          for: 15m
+          labels:
+            severity: critical
+            alert_type: absent
+            component: "odigos-instrumentor"
+            service: "odigos"
+            source: "otel-k8sclusterreceiver"
+          annotations:
+            summary: "Odigos odigos-instrumentor Deployment metrics absent (OTel)"
+            description: |
+              No `k8s_deployment_desired` series for namespace `odigos-system` /
+              deployment `odigos-instrumentor` for more than 15m. Either
+              the Deployment was deleted, the OTel Collector running
+              k8sclusterreceiver is down, or its pipeline to Prometheus is
+              broken.
+            action: |
+              kubectl -n odigos-system get deploy odigos-instrumentor
+              kubectl get pods -A -l app.kubernetes.io/name=opentelemetry-collector
+            runbook_url: "https://docs.odigos.io/"
