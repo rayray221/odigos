@@ -38,7 +38,7 @@ type PodsWebhook struct {
 	client.Client
 	DistrosGetter *distros.Getter
 	// decoder is used to decode the admission request's raw object into a structured corev1.Pod.
-	Decoder     admission.Decoder
+	Decoder admission.Decoder
 }
 
 var _ admission.Handler = &PodsWebhook{}
@@ -412,6 +412,17 @@ func (p *PodsWebhook) injectOdigosToContainer(containerConfig *odigosv1.Containe
 			return false, nil, fmt.Errorf("failed to marshal custom instrumentations config: %w", err)
 		}
 		existingEnvNames = podswebhook.InjectConstEnvVarToPodContainer(existingEnvNames, podContainerSpec, k8sconsts.OdigosPhpAgentCustomInstrumentationsEnvVar, string(customInstrumentationsConfigJson))
+	}
+
+	// Payload collection configuration (native agents that receive config via env vars)
+	payloadCollectionEnabled := containerConfig.Traces != nil && containerConfig.Traces.PayloadCollection != nil
+	supportsPayloadCollection := distroMetadata.Traces != nil && distroMetadata.Traces.PayloadCollection != nil && distroMetadata.Traces.PayloadCollection.Supported
+	if payloadCollectionEnabled && supportsPayloadCollection && distroMetadata.ConfigAsEnvVars {
+		payloadCollectionConfigJson, err := json.Marshal(containerConfig.Traces.PayloadCollection)
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to marshal payload collection config: %w", err)
+		}
+		existingEnvNames = podswebhook.InjectConstEnvVarToPodContainer(existingEnvNames, podContainerSpec, k8sconsts.OdigosAgentPayloadCollectionEnvVar, string(payloadCollectionConfigJson))
 	}
 
 	volumeMounted := false
